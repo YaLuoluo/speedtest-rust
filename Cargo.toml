@@ -22,7 +22,7 @@ socket2 = "0.6.1"
 listenfd = "1.0.2"
 futures = "0.3.31"
 #ip
-maxminddb = "0.26.0"
+maxminddb = "0.27"
 #image processing
 imageproc = "0.25.0"
 ab_glyph = "0.2.32"

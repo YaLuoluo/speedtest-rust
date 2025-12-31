@@ -1,7 +1,6 @@
-use std::net::IpAddr;
-use maxminddb::{MaxMindDbError, Reader};
-use serde::Deserialize;
-use crate::ip::mmdb::mmdb_record::{MMDBRecord, MMDBResult};
+use log::warn;
+use maxminddb::Reader;
+use crate::ip::mmdb::mmdb_record::MMDBResult;
 
 pub struct  MMDBReader {
     reader : Reader<Vec<u8>>
@@ -15,13 +14,21 @@ impl MMDBReader {
             None
         }
     }
-    fn raw_lookup<'a, T: Deserialize<'a>>(&'a self, ip: IpAddr) -> Result<Option<T>, MaxMindDbError> {
-        self.reader.lookup(ip)
-    }
+
     pub fn lookup(&mut self,address: &str) -> Option<MMDBResult> {
-        if let Ok(Some(result)) = self.raw_lookup::<MMDBRecord>(address.parse().unwrap()) {
-            return Some(result.get_result())
+        match self.reader.lookup(address.parse().unwrap()) {
+            Err(e) => {
+                warn!("Geo IP database error: {}", e);
+                None
+            }
+            Ok(o) => {
+                if let Ok(Some(result)) = o.decode() {
+                    Some(result)
+                } else {
+                    warn!("Failed to deserialise Geo IP data {:?}", o);
+                    None
+                }
+            }
         }
-        None
     }
 }
