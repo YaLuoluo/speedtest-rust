@@ -1,98 +1,142 @@
-name: Docker
+name: Docker Build (Manual)
 
-# This workflow uses actions that are not certified by GitHub.
-# They are provided by a third-party and are governed by
-# separate terms of service, privacy policy, and support
-# documentation.
-
+# 手动触发工作流
 on:
-  schedule:
-    - cron: '26 12 * * *'
-  push:
-    branches: [ "master" ]
-    # Publish semver tags as releases.
-    tags: [ 'v*.*.*' ]
-  pull_request:
-    branches: [ "master" ]
+  workflow_dispatch:  # 添加手动触发选项
+    inputs:
+      image_name:
+        description: '自定义镜像名称（可选）'
+        required: false
+        default: ''
+      tag_name:
+        description: '自定义标签（可选，默认使用分支名）'
+        required: false
+        default: ''
+  # 保留原有的自动触发（可选，如不需要可删除）
+  # push:
+  #   branches: [ "master" ]
+  #   tags: [ 'v*.*.*' ]
+  # pull_request:
+  #   branches: [ "master" ]
 
 env:
-  # Use docker.io for Docker Hub if empty
+  # 使用 docker.io 作为 Docker Hub，或 ghcr.io 作为 GitHub Container Registry
   REGISTRY: ghcr.io
-  # github.repository as <account>/<repo>
-  IMAGE_NAME: ${{ github.repository }}
-
+  # 默认镜像名称：github.repository
+  DEFAULT_IMAGE_NAME: ${{ github.repository }}
+  # 使用自定义 Dockerfile
+  DOCKERFILE_PATH: Dockerfile.alpine
 
 jobs:
   build:
-
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
-      # This is used to complete the identity challenge
-      # with sigstore/fulcio when running outside of PRs.
+      # 用于 cosign 签名
       id-token: write
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Install the cosign tool except on PR
-      # https://github.com/sigstore/cosign-installer
+      # 确定最终使用的镜像名称
+      - name: Determine image name
+        id: image-name
+        run: |
+          if [ -n "${{ github.event.inputs.image_name }}" ]; then
+            echo "IMAGE_NAME=${{ github.event.inputs.image_name }}" >> $GITHUB_OUTPUT
+          else
+            echo "IMAGE_NAME=${{ env.DEFAULT_IMAGE_NAME }}" >> $GITHUB_OUTPUT
+          fi
+          echo "使用镜像名称: $(echo "IMAGE_NAME=${{ env.DEFAULT_IMAGE_NAME }}" | sed 's/IMAGE_NAME=//')"
+
+      # 确定最终使用的标签
+      - name: Determine tag
+        id: tag
+        run: |
+          if [ -n "${{ github.event.inputs.tag_name }}" ]; then
+            echo "TAG=${{ github.event.inputs.tag_name }}" >> $GITHUB_OUTPUT
+          elif [ -n "${{ github.ref_name }}" ]; then
+            # 使用分支名或标签名作为默认标签
+            echo "TAG=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          else
+            echo "TAG=latest" >> $GITHUB_OUTPUT
+          fi
+          echo "使用标签: $(echo "TAG=${{ github.ref_name }}" | sed 's/TAG=//' 2>/dev/null || echo "latest")"
+
+      # 安装 cosign 工具
       - name: Install cosign
-        if: github.event_name != 'pull_request'
-        uses: sigstore/cosign-installer@59acb6260d9c0ba8f4a2f9d9b48431a222b68e20 #v3.5.0
+        uses: sigstore/cosign-installer@59acb6260d9c0ba8f4a2f9d9b48431a222b68e20 # v3.5.0
         with:
           cosign-release: 'v2.2.4'
 
-      # Set up BuildKit Docker container builder to be able to build
-      # multi-platform images and export cache
-      # https://github.com/docker/setup-buildx-action
+      # 设置 Docker Buildx
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f95db51fddba0c2d1ec667646a06c2ce06100226 # v3.0.0
 
-      # Login against a Docker registry except on PR
-      # https://github.com/docker/login-action
+      # 登录到容器注册表
       - name: Log into registry ${{ env.REGISTRY }}
-        if: github.event_name != 'pull_request'
         uses: docker/login-action@343f7c4344506bcbf9b4de18042ae17996df046d # v3.0.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Extract metadata (tags, labels) for Docker
-      # https://github.com/docker/metadata-action
-      - name: Extract Docker metadata
+      # 生成 Docker 元数据（标签和标签信息）
+      - name: Generate Docker metadata
         id: meta
-        uses: docker/metadata-action@96383f45573cb7f253c731d3b3ab81c87ef81934 # v5.0.0
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        run: |
+          # 构建完整的镜像引用
+          FULL_IMAGE_NAME="${{ env.REGISTRY }}/${{ steps.image-name.outputs.IMAGE_NAME }}:${{ steps.tag.outputs.TAG }}"
+          
+          # 创建简单的元数据输出
+          echo "tags=$FULL_IMAGE_NAME" >> $GITHUB_OUTPUT
+          echo "labels=org.opencontainers.image.created=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_OUTPUT
+          echo "labels=org.opencontainers.image.revision=${{ github.sha }}" >> $GITHUB_OUTPUT
+          echo "labels=org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" >> $GITHUB_OUTPUT
+          
+          echo "生成的镜像引用: $FULL_IMAGE_NAME"
 
-      # Build and push Docker image with Buildx (don't push on PR)
-      # https://github.com/docker/build-push-action
+      # 验证 Dockerfile.alpine 是否存在
+      - name: Verify Dockerfile exists
+        run: |
+          if [ ! -f "${{ env.DOCKERFILE_PATH }}" ]; then
+            echo "错误: 未找到 ${{ env.DOCKERFILE_PATH }} 文件"
+            exit 1
+          fi
+          echo "找到 Dockerfile: ${{ env.DOCKERFILE_PATH }}"
+          echo "文件内容预览（前20行）:"
+          head -20 "${{ env.DOCKERFILE_PATH }}" || true
+
+      # 构建并推送 Docker 镜像
       - name: Build and push Docker image
         id: build-and-push
         uses: docker/build-push-action@0565240e2d4ab88bba5387d719585280857ece09 # v5.0.0
         with:
           context: .
-          push: ${{ github.event_name != 'pull_request' }}
+          file: ${{ env.DOCKERFILE_PATH }}  # 关键修改：指定使用 Dockerfile.alpine
+          push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          platforms: linux/amd64,linux/arm64  # 可选：指定构建多平台镜像
 
-      # Sign the resulting Docker image digest except on PRs.
-      # This will only write to the public Rekor transparency log when the Docker
-      # repository is public to avoid leaking data.  If you would like to publish
-      # transparency data even for private images, pass --force to cosign below.
-      # https://github.com/sigstore/cosign
-      - name: Sign the published Docker image
-        if: ${{ github.event_name != 'pull_request' }}
+      # 显示构建结果
+      - name: Show build results
+        run: |
+          echo "✅ 镜像构建完成！"
+          echo "镜像地址: ${{ steps.meta.outputs.tags }}"
+          echo "镜像摘要: ${{ steps.build-and-push.outputs.digest }}"
+          echo "构建缓存已保存"
+
+      # 使用 cosign 对镜像进行签名
+      - name: Sign the Docker image
         env:
-          # https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions#using-an-intermediate-environment-variable
           TAGS: ${{ steps.meta.outputs.tags }}
           DIGEST: ${{ steps.build-and-push.outputs.digest }}
-        # This step uses the identity token to provision an ephemeral certificate
-        # against the sigstore community Fulcio instance.
-        run: echo "${TAGS}" | xargs -I {} cosign sign --yes {}@${DIGEST}
+        run: |
+          echo "正在签名镜像..."
+          echo "${TAGS}" | xargs -I {} cosign sign --yes {}@${DIGEST}
+          echo "✅ 镜像签名完成，签名已上传到透明度日志"
